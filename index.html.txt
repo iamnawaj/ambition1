@@ -1,0 +1,613 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { Transaction, CategoriesData, TimeframeMode, TransactionType, SheetsConfig } from './types';
+import { sheetsService } from './services/sheetsApi';
+import { MONTH_NAMES } from './services/mockData';
+import { Header } from './components/Header';
+import { SummaryCards } from './components/SummaryCards';
+import { ExpensePieChart } from './components/Charts/ExpensePieChart';
+import { TrendLineChart } from './components/Charts/TrendLineChart';
+import { TransactionForm } from './components/TransactionForm';
+import { TransactionList } from './components/TransactionList';
+import { CategoryManager } from './components/CategoryManager';
+import { MonthSelectorModal } from './components/MonthSelectorModal';
+import { EditTransactionModal } from './components/EditTransactionModal';
+import { SheetsConfigModal } from './components/SheetsConfigModal';
+import { MobileNavBar, MobileTab } from './components/MobileNavBar';
+import { Plus, Minus } from 'lucide-react';
+
+export default function App() {
+  // Core Data State
+  const [transactions, setTransactions] = useState<Transaction[]>(() => sheetsService.loadTransactions());
+  const [categories, setCategories] = useState<CategoriesData>(() => sheetsService.loadCategories());
+  const [monthlyNumbers, setMonthlyNumbers] = useState<Record<string, Record<string, number>>>(() =>
+    sheetsService.loadMonthlyNumbers()
+  );
+
+  // Timeframe and Navigation State
+  const [timeframeMode, setTimeframeMode] = useState<TimeframeMode>('monthly');
+  const [selectedMonth, setSelectedMonth] = useState<number>(() => {
+    const d = new Date();
+    return d.getFullYear() === 2026 ? d.getMonth() : 9; // October (index 9)
+  });
+  const [selectedYear, setSelectedYear] = useState<number>(2026);
+
+  // Mobile View Navigation State
+  const [mobileTab, setMobileTab] = useState<MobileTab>('home');
+  const [addFormInitialType, setAddFormInitialType] = useState<TransactionType>('Expense');
+
+  // Modals
+  const [isMonthModalOpen, setIsMonthModalOpen] = useState(false);
+  const [isSheetsModalOpen, setIsSheetsModalOpen] = useState(false);
+  const [editingTransaction, setEditingTransaction] = useState<Transaction | null>(null);
+
+  // Google Sheets Sync State
+  const [sheetsConfig, setSheetsConfig] = useState<SheetsConfig>(() => sheetsService.getConfig());
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  // Initial Budget State (keyed by 'YYYY-MM')
+  const [initialBudgets, setInitialBudgets] = useState<Record<string, number>>(() =>
+    sheetsService.loadInitialBudgets()
+  );
+
+  const currentYearMonth = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}`;
+  const currentInitialBudget = initialBudgets[currentYearMonth] ?? 0;
+
+  const handleUpdateInitialBudget = (amount: number) => {
+    const updated = {
+      ...initialBudgets,
+      [currentYearMonth]: Math.max(0, amount),
+    };
+    setInitialBudgets(updated);
+    sheetsService.saveInitialBudgets(updated);
+  };
+
+  // Initial Sync check
+  useEffect(() => {
+    if (sheetsConfig.spreadsheetId) {
+      handleSyncNow();
+    }
+  }, []);
+
+  const handleSyncNow = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await sheetsService.fetchFromGoogleSheets();
+      if (res && res.success) {
+        setTransactions(res.transactions);
+        setCategories(res.categories);
+        setSheetsConfig(sheetsService.getConfig());
+      }
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const handleSaveSheetsConfig = (cfg: Partial<SheetsConfig>) => {
+    sheetsService.saveConfig(cfg);
+    setSheetsConfig(sheetsService.getConfig());
+  };
+
+  // Filtered transactions according to Timeframe Mode ('monthly', 'yearly', 'all-time')
+  const currentMonthStr = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}`;
+  const currentYearStr = `${selectedYear}`;
+
+  const filteredTransactions = useMemo(() => {
+    if (timeframeMode === 'monthly') {
+      return transactions.filter((t) => t.date.startsWith(currentMonthStr));
+    }
+    if (timeframeMode === 'yearly') {
+      return transactions.filter((t) => t.date.startsWith(currentYearStr));
+    }
+    return transactions; // 'all-time'
+  }, [transactions, timeframeMode, currentMonthStr, currentYearStr]);
+
+  // Totals in Real Time
+  const totalIncome = useMemo(
+    () =>
+      filteredTransactions
+        .filter((t) => t.type === 'Income')
+        .reduce((sum, t) => sum + t.amount, 0),
+    [filteredTransactions]
+  );
+
+  const totalExpenses = useMemo(
+    () =>
+      filteredTransactions
+        .filter((t) => t.type === 'Expense')
+        .reduce((sum, t) => sum + t.amount, 0),
+    [filteredTransactions]
+  );
+
+  const periodLabel = useMemo(() => {
+    if (timeframeMode === 'monthly') {
+      return `${MONTH_NAMES[selectedMonth]?.name} ${selectedYear}`;
+    }
+    if (timeframeMode === 'yearly') {
+      return `Year ${selectedYear}`;
+    }
+    return 'All-Time Records';
+  }, [timeframeMode, selectedMonth, selectedYear]);
+
+  // Statistics for Month Picker Modal (Jan - Dec)
+  const monthlyStats = useMemo(() => {
+    const stats: { [m: number]: { income: number; expense: number; count: number } } = {};
+    for (let m = 0; m < 12; m++) {
+      const mStr = `${selectedYear}-${String(m + 1).padStart(2, '0')}`;
+      const mTx = transactions.filter((t) => t.date.startsWith(mStr));
+      const inc = mTx.filter((t) => t.type === 'Income').reduce((s, t) => s + t.amount, 0);
+      const exp = mTx.filter((t) => t.type === 'Expense').reduce((s, t) => s + t.amount, 0);
+      stats[m] = { income: inc, expense: exp, count: mTx.length };
+    }
+    return stats;
+  }, [transactions, selectedYear]);
+
+  // Add Transaction
+  const handleAddTransaction = async (newTxData: Omit<Transaction, 'id'>) => {
+    const newTx: Transaction = {
+      ...newTxData,
+      id: `tx-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+    };
+
+    const updated = [newTx, ...transactions];
+    setTransactions(updated);
+    sheetsService.saveTransactions(updated);
+
+    // Sync to Google Sheets tab "Transactions" via REST API
+    await sheetsService.appendTransactionToSheet(newTx);
+  };
+
+  // Immediate Inline Amount Edit in Transaction List
+  const handleUpdateAmount = (id: string, newAmount: number) => {
+    const updated = transactions.map((t) => (t.id === id ? { ...t, amount: newAmount } : t));
+    setTransactions(updated);
+    sheetsService.saveTransactions(updated);
+    sheetsService.syncAllTransactionsToSheet(updated);
+  };
+
+  // Full Transaction Edit
+  const handleSaveEditedTransaction = (updatedTx: Transaction) => {
+    const updated = transactions.map((t) => (t.id === updatedTx.id ? updatedTx : t));
+    setTransactions(updated);
+    sheetsService.saveTransactions(updated);
+    sheetsService.syncAllTransactionsToSheet(updated);
+  };
+
+  // Delete Transaction
+  const handleDeleteTransaction = (id: string) => {
+    const updated = transactions.filter((t) => t.id !== id);
+    setTransactions(updated);
+    sheetsService.saveTransactions(updated);
+    sheetsService.syncAllTransactionsToSheet(updated);
+  };
+
+  /**
+   * Add Category Rule:
+   * Adds the category across all 12 months with $0 (0 bucks) in other months.
+   */
+  const handleAddCategory = async (
+    type: TransactionType,
+    newCatName: string,
+    initialAmountForThisMonth: number = 0
+  ) => {
+    const cleanName = newCatName.trim();
+    if (!cleanName) return;
+
+    // 1. Add to universal categories list (Column A for Income, Column B for Expense)
+    let updatedCategories: CategoriesData;
+    if (type === 'Income') {
+      if (categories.incomeCategories.includes(cleanName)) return;
+      updatedCategories = {
+        ...categories,
+        incomeCategories: [...categories.incomeCategories, cleanName],
+      };
+    } else {
+      if (categories.expenseCategories.includes(cleanName)) return;
+      updatedCategories = {
+        ...categories,
+        expenseCategories: [...categories.expenseCategories, cleanName],
+      };
+    }
+
+    setCategories(updatedCategories);
+    sheetsService.saveCategories(updatedCategories);
+    await sheetsService.syncCategoriesToSheet(updatedCategories);
+
+    // 2. Set number in this particular month to initialAmountForThisMonth, and in ALL other months to 0!
+    const updatedMonthlyNumbers = { ...monthlyNumbers };
+    updatedMonthlyNumbers[cleanName] = {};
+
+    for (let m = 1; m <= 12; m++) {
+      const ym = `${selectedYear}-${String(m).padStart(2, '0')}`;
+      if (m === selectedMonth + 1) {
+        updatedMonthlyNumbers[cleanName][ym] = initialAmountForThisMonth;
+      } else {
+        updatedMonthlyNumbers[cleanName][ym] = 0; // 0 bucks in all other months!
+      }
+    }
+
+    setMonthlyNumbers(updatedMonthlyNumbers);
+    sheetsService.saveMonthlyNumbers(updatedMonthlyNumbers);
+
+    // If an initial amount was specified for this month (> 0), log a real-time transaction
+    if (initialAmountForThisMonth > 0) {
+      const txDate = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`;
+      await handleAddTransaction({
+        date: txDate,
+        type,
+        category: cleanName,
+        amount: initialAmountForThisMonth,
+        description: `Initial ${cleanName} for ${MONTH_NAMES[selectedMonth]?.name}`,
+      });
+    }
+  };
+
+  /**
+   * Real-time Category Amount Change in the Selected Month:
+   * Changes the category amount for this month, immediately updating
+   * transaction records, summary cards, and charts in real time!
+   */
+  const handleUpdateCategoryAmountInMonth = async (
+    category: string,
+    type: TransactionType,
+    newAmount: number
+  ) => {
+    const ym = `${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}`;
+
+    // Update monthly category budget number
+    const updatedNumbers = {
+      ...monthlyNumbers,
+      [category]: {
+        ...(monthlyNumbers[category] || {}),
+        [ym]: newAmount,
+      },
+    };
+    setMonthlyNumbers(updatedNumbers);
+    sheetsService.saveMonthlyNumbers(updatedNumbers);
+
+    // Find if an existing transaction for this category in this month exists:
+    const existingTxIndex = transactions.findIndex(
+      (t) => t.category === category && t.date.startsWith(ym) && t.type === type
+    );
+
+    if (existingTxIndex !== -1) {
+      const updatedTxs = [...transactions];
+      if (newAmount > 0) {
+        updatedTxs[existingTxIndex] = {
+          ...updatedTxs[existingTxIndex],
+          amount: newAmount,
+        };
+      } else {
+        // Reduced to 0
+        updatedTxs.splice(existingTxIndex, 1);
+      }
+      setTransactions(updatedTxs);
+      sheetsService.saveTransactions(updatedTxs);
+      sheetsService.syncAllTransactionsToSheet(updatedTxs);
+    } else if (newAmount > 0) {
+      // Create new transaction for this month
+      const txDate = `${ym}-01`;
+      const newTx: Transaction = {
+        id: `tx-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+        date: txDate,
+        type,
+        category,
+        amount: newAmount,
+        description: `${category} logged for ${MONTH_NAMES[selectedMonth]?.name}`,
+      };
+      const updatedTxs = [newTx, ...transactions];
+      setTransactions(updatedTxs);
+      sheetsService.saveTransactions(updatedTxs);
+      await sheetsService.appendTransactionToSheet(newTx);
+    }
+  };
+
+  // Delete Category across all months and sync to Sheets
+  const handleDeleteCategory = async (type: TransactionType, catFullName: string) => {
+    let updatedCategories: CategoriesData;
+    if (type === 'Income') {
+      updatedCategories = {
+        ...categories,
+        incomeCategories: categories.incomeCategories.filter((c) => c !== catFullName),
+      };
+    } else {
+      updatedCategories = {
+        ...categories,
+        expenseCategories: categories.expenseCategories.filter((c) => c !== catFullName),
+      };
+    }
+
+    setCategories(updatedCategories);
+    sheetsService.saveCategories(updatedCategories);
+    await sheetsService.syncCategoriesToSheet(updatedCategories);
+
+    // Also remove from monthlyNumbers
+    const updatedMonthlyNumbers = { ...monthlyNumbers };
+    delete updatedMonthlyNumbers[catFullName];
+    setMonthlyNumbers(updatedMonthlyNumbers);
+    sheetsService.saveMonthlyNumbers(updatedMonthlyNumbers);
+
+    // Filter out transactions matching this category
+    const updatedTxs = transactions.filter((t) => !(t.type === type && t.category === catFullName));
+    if (updatedTxs.length !== transactions.length) {
+      setTransactions(updatedTxs);
+      sheetsService.saveTransactions(updatedTxs);
+      sheetsService.syncAllTransactionsToSheet(updatedTxs);
+    }
+  };
+
+  // Quick Action Buttons on Mobile Home: Plus (+) and Minus (-)
+  const handleQuickAdd = (type: TransactionType) => {
+    setAddFormInitialType(type);
+    setMobileTab('add');
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 pb-20 md:pb-10 font-sans selection:bg-emerald-500/20 selection:text-emerald-900">
+      {/* Top Header with Month selector button and Circular Wheel */}
+      <Header
+        timeframeMode={timeframeMode}
+        onTimeframeChange={setTimeframeMode}
+        selectedMonth={selectedMonth}
+        selectedYear={selectedYear}
+        onOpenMonthSelector={() => setIsMonthModalOpen(true)}
+        onOpenSheetsConfig={() => setIsSheetsModalOpen(true)}
+        sheetsConfig={sheetsConfig}
+        isSyncing={isSyncing}
+        onSyncNow={handleSyncNow}
+      />
+
+      <main className="max-w-7xl mx-auto px-3.5 sm:px-6 pt-5">
+        {/* ======================================================== */}
+        {/* MOBILE VIEW (Visible on < md screens)                   */}
+        {/* ======================================================== */}
+        <div className="md:hidden space-y-4">
+          {/* TAB 1: MOBILE HOME */}
+          {mobileTab === 'home' && (
+            <div className="space-y-4 animate-in fade-in duration-200">
+              {/* Quick Log Buttons Above the Fold */}
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => handleQuickAdd('Income')}
+                  className="flex items-center justify-center gap-2.5 py-3.5 px-3 bg-gradient-to-r from-emerald-600 to-teal-600 active:scale-95 text-white font-bold text-sm rounded-2xl shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center">
+                    <Plus className="w-5 h-5 stroke-[3]" />
+                  </div>
+                  <div className="text-left">
+                    <span className="text-[10px] uppercase font-semibold text-emerald-100 block leading-none">
+                      Quick Log
+                    </span>
+                    <span className="text-sm sm:text-base font-extrabold leading-tight">Income (+)</span>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleQuickAdd('Expense')}
+                  className="flex items-center justify-center gap-2.5 py-3.5 px-3 bg-gradient-to-r from-rose-600 to-red-600 active:scale-95 text-white font-bold text-sm rounded-2xl shadow-md shadow-rose-600/30 transition-all cursor-pointer"
+                >
+                  <div className="w-8 h-8 rounded-xl bg-white/20 flex items-center justify-center">
+                    <Minus className="w-5 h-5 stroke-[3]" />
+                  </div>
+                  <div className="text-left">
+                    <span className="text-[10px] uppercase font-semibold text-rose-100 block leading-none">
+                      Quick Log
+                    </span>
+                    <span className="text-sm sm:text-base font-extrabold leading-tight">Expense (-)</span>
+                  </div>
+                </button>
+              </div>
+
+              {/* Summary Cards */}
+              <SummaryCards
+                totalIncome={totalIncome}
+                totalExpenses={totalExpenses}
+                timeframeMode={timeframeMode}
+                periodLabel={periodLabel}
+                transactionCount={filteredTransactions.length}
+                initialBudget={currentInitialBudget}
+                onUpdateInitialBudget={handleUpdateInitialBudget}
+              />
+
+              {/* Responsive Income & Expense Breakdown Donut */}
+              <ExpensePieChart
+                transactions={filteredTransactions}
+                categories={categories}
+                periodLabel={periodLabel}
+                onQuickLog={(type) => handleQuickAdd(type || 'Expense')}
+              />
+
+              {/* Monthly Category Matrix on Home */}
+              <CategoryManager
+                categories={categories}
+                monthTransactions={filteredTransactions}
+                monthlyNumbers={monthlyNumbers}
+                onAddCategory={handleAddCategory}
+                onUpdateCategoryAmountInMonth={handleUpdateCategoryAmountInMonth}
+                onDeleteCategory={handleDeleteCategory}
+                selectedMonth={selectedMonth}
+                selectedYear={selectedYear}
+              />
+
+              {/* Recent Activity */}
+              <TransactionList
+                transactions={filteredTransactions}
+                categories={categories}
+                onUpdateAmount={handleUpdateAmount}
+                onEditTransaction={(tx) => setEditingTransaction(tx)}
+                onDeleteTransaction={handleDeleteTransaction}
+                maxInitialRows={5}
+              />
+            </div>
+          )}
+
+          {/* TAB 2: MOBILE ADD NEW */}
+          {mobileTab === 'add' && (
+            <div className="space-y-4 animate-in fade-in duration-200">
+              <TransactionForm
+                categories={categories}
+                onSubmit={async (tx) => {
+                  await handleAddTransaction(tx);
+                  setMobileTab('home');
+                }}
+                onAddCategory={(type, name) => handleAddCategory(type, name, 0)}
+                initialType={addFormInitialType}
+                defaultDate={`${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`}
+              />
+            </div>
+          )}
+
+          {/* TAB 3: MOBILE ANALYSIS */}
+          {mobileTab === 'analysis' && (
+            <div className="space-y-4 animate-in fade-in duration-200">
+              <ExpensePieChart
+                transactions={filteredTransactions}
+                categories={categories}
+                periodLabel={periodLabel}
+                onQuickLog={(type) => handleQuickAdd(type || 'Expense')}
+              />
+
+              <TrendLineChart
+                transactions={transactions}
+                currentYear={selectedYear}
+                currentMonth={selectedMonth}
+              />
+            </div>
+          )}
+
+          {/* TAB 4: MOBILE HISTORY */}
+          {mobileTab === 'history' && (
+            <div className="space-y-4 animate-in fade-in duration-200">
+              <TransactionList
+                transactions={filteredTransactions}
+                categories={categories}
+                onUpdateAmount={handleUpdateAmount}
+                onEditTransaction={(tx) => setEditingTransaction(tx)}
+                onDeleteTransaction={handleDeleteTransaction}
+              />
+            </div>
+          )}
+
+          {/* TAB 5: MOBILE CATEGORIES */}
+          {mobileTab === 'categories' && (
+            <div className="space-y-4 animate-in fade-in duration-200">
+              <CategoryManager
+                categories={categories}
+                monthTransactions={filteredTransactions}
+                monthlyNumbers={monthlyNumbers}
+                onAddCategory={handleAddCategory}
+                onUpdateCategoryAmountInMonth={handleUpdateCategoryAmountInMonth}
+                onDeleteCategory={handleDeleteCategory}
+                selectedMonth={selectedMonth}
+                selectedYear={selectedYear}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* ======================================================== */}
+        {/* DESKTOP DASHBOARD GRID (Visible on >= md screens)        */}
+        {/* ======================================================== */}
+        <div className="hidden md:flex flex-col gap-5">
+          {/* Row 1: Summary Cards */}
+          <SummaryCards
+            totalIncome={totalIncome}
+            totalExpenses={totalExpenses}
+            timeframeMode={timeframeMode}
+            periodLabel={periodLabel}
+            transactionCount={filteredTransactions.length}
+            initialBudget={currentInitialBudget}
+            onUpdateInitialBudget={handleUpdateInitialBudget}
+          />
+
+          {/* Row 2: Two-Column Workstation Grid */}
+          <div className="grid grid-cols-12 gap-5 items-start">
+            {/* Left Column: Input Form + Categories Allocator */}
+            <div className="col-span-12 lg:col-span-5 space-y-5">
+              <TransactionForm
+                categories={categories}
+                onSubmit={handleAddTransaction}
+                onAddCategory={(type, name) => handleAddCategory(type, name, 0)}
+                initialType="Expense"
+                defaultDate={`${selectedYear}-${String(selectedMonth + 1).padStart(2, '0')}-01`}
+              />
+
+              <CategoryManager
+                categories={categories}
+                monthTransactions={filteredTransactions}
+                monthlyNumbers={monthlyNumbers}
+                onAddCategory={handleAddCategory}
+                onUpdateCategoryAmountInMonth={handleUpdateCategoryAmountInMonth}
+                onDeleteCategory={handleDeleteCategory}
+                selectedMonth={selectedMonth}
+                selectedYear={selectedYear}
+              />
+            </div>
+
+            {/* Right Column: Visual Analytics Charts */}
+            <div className="col-span-12 lg:col-span-7 space-y-5">
+              <ExpensePieChart
+                transactions={filteredTransactions}
+                categories={categories}
+                periodLabel={periodLabel}
+                onQuickLog={(type) => handleQuickAdd(type || 'Expense')}
+              />
+
+              <TrendLineChart
+                transactions={transactions}
+                currentYear={selectedYear}
+                currentMonth={selectedMonth}
+              />
+            </div>
+          </div>
+
+          {/* Row 3: Transaction Logs */}
+          <TransactionList
+            transactions={filteredTransactions}
+            categories={categories}
+            onUpdateAmount={handleUpdateAmount}
+            onEditTransaction={(tx) => setEditingTransaction(tx)}
+            onDeleteTransaction={handleDeleteTransaction}
+          />
+        </div>
+      </main>
+
+      {/* Sticky Mobile Bottom Navigation Bar */}
+      <MobileNavBar activeTab={mobileTab} onTabChange={setMobileTab} />
+
+      {/* Jan to Dec Month Selector Modal */}
+      <MonthSelectorModal
+        isOpen={isMonthModalOpen}
+        onClose={() => setIsMonthModalOpen(false)}
+        selectedMonth={selectedMonth}
+        selectedYear={selectedYear}
+        onSelect={(m, y) => {
+          setSelectedMonth(m);
+          setSelectedYear(y);
+        }}
+        monthlyStats={monthlyStats}
+      />
+
+      {/* Full Transaction Edit Modal */}
+      <EditTransactionModal
+        transaction={editingTransaction}
+        categories={categories}
+        isOpen={Boolean(editingTransaction)}
+        onClose={() => setEditingTransaction(null)}
+        onSave={handleSaveEditedTransaction}
+        onDelete={handleDeleteTransaction}
+      />
+
+      {/* Google Sheets REST API Settings Modal */}
+      <SheetsConfigModal
+        isOpen={isSheetsModalOpen}
+        onClose={() => setIsSheetsModalOpen(false)}
+        config={sheetsConfig}
+        onSaveConfig={handleSaveSheetsConfig}
+        onSyncNow={handleSyncNow}
+        isSyncing={isSyncing}
+      />
+    </div>
+  );
+}
